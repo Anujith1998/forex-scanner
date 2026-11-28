@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import math
+from datetime import datetime, timezone, timedelta, time as clock_time
+from zoneinfo import ZoneInfo
 import time
 
 import numpy as np
@@ -157,17 +157,20 @@ def analyze(pair: str, raw: pd.DataFrame, timeframe: str):
         score_buy += 5
         score_sell += 5
 
+    # Keep displayed scores on a true 0–100 scale.
+    score_buy = min(100, score_buy)
+    score_sell = min(100, score_sell)
     direction = "WAIT"
     score = max(score_buy, score_sell)
     setup = "No confirmed setup"
     if long_setup:
-        direction, score, setup = "BUY", score_buy, "Trend pullback" if near_ema_long else "20-bar breakout"
+        direction, score, setup = "BUY", score_buy, "Price pulled back during an upward trend" if near_ema_long else "Price moved above recent highs"
     elif short_setup:
-        direction, score, setup = "SELL", score_sell, "Trend pullback" if near_ema_short else "20-bar breakdown"
+        direction, score, setup = "SELL", score_sell, "Price pulled back during a downward trend" if near_ema_short else "Price moved below recent lows"
     elif uptrend:
-        setup = "Uptrend — waiting for trigger"
+        setup = "Price is generally rising — waiting for a good entry"
     elif downtrend:
-        setup = "Downtrend — waiting for trigger"
+        setup = "Price is generally falling — waiting for a good entry"
 
     grade = "A" if direction != "WAIT" and score >= 80 else (
         "B" if score >= 60 else ("C" if score >= 40 else "D")
@@ -185,7 +188,7 @@ def analyze(pair: str, raw: pd.DataFrame, timeframe: str):
     ps = pip_size(pair)
     return {
         "Pair": pair, "Signal": direction, "Grade": grade, "Score": int(score),
-        "Setup": setup, "Price": price, "RSI": rsi, "ATR_pips": atr/ps,
+        "Setup": setup, "Price": price, "Pressure": rsi, "Typical_move_pips": atr/ps,
         "Entry": entry, "Stop": stop, "Target_1": target1, "Target_2": target2,
         "Risk_pips": stop_dist/ps, "Time": d.index[-1],
         "Chart": d[["close", "EMA20", "EMA50", "EMA200"]].tail(120),
@@ -233,23 +236,35 @@ with st.sidebar:
     st.divider()
     st.caption("No broker connection or automatic order placement.")
 
-if not key:
-    st.warning("Add your Twelve Data API key in the sidebar to enable market-data scans.")
-    st.markdown("""
-    **How to get connected**
-    1. Create an account with [Twelve Data](https://twelvedata.com/).
-    2. Copy your API key from its dashboard.
-    3. Paste the key into the password field in the sidebar.
-    4. Start with the 6-pair scan to check your plan's request allowance.
-    """)
-    st.stop()
-
-tab_intraday, tab_swing, tab_risk = st.tabs(["⚡ Intraday scanner", "📈 Swing scanner", "🧮 Position sizing"])
+tab_intraday, tab_swing, tab_risk, tab_duration = st.tabs([
+    "⚡ Intraday scanner", "📈 Swing scanner", "🧮 Position sizing", "⏳ Trade duration calculator"
+])
 
 def show_scan(tab, label, interval):
     with tab:
         st.subheader(label)
-        st.caption(f"Timeframe: {interval} candles · 300-bar history · Signals are candidates, not orders.")
+        interval_label = "15-minute candles" if interval == "15min" else "daily candles"
+        st.caption(f"Chart interval: {interval_label} · Up to 300 candles of history. Signals are watchlist ideas, not orders.")
+        with st.expander("Technical terms explained in simple language"):
+            st.markdown("""
+            - **RSI — buying/selling pressure:** A 0–100 reading showing which side has been stronger recently. It can show when a move is stretched, but it does not predict a reversal.
+            - **ATR — typical movement:** An estimate of how far price usually moves in one candle. It measures movement, not direction.
+            - **EMA — average price line:** A smoothed line that helps show price direction. The 20 line reacts faster; the 50 and 200 show broader direction.
+            - **MACD — momentum check:** Compares faster and slower averages to show whether upward or downward momentum is strengthening.
+            - **Pip:** A small standard unit of currency movement. Most pairs use 0.0001; yen pairs usually use 0.01.
+            - **Breakout:** Price moves above a recent high. A breakdown is a move below a recent low.
+            - **Stop-loss:** The planned exit level intended to limit a loss.
+            - **Target:** A planned price level where you may take profit. It is not guaranteed to be reached.
+            - **A/B/C/D grade:** A summary of how many scanner rules agree. It is not a win rate or a probability of profit.
+            """)
+        if not key:
+            st.warning("Add your Twelve Data API key in the sidebar to use the live currency scanner. The trading-time calculator works without an API key.")
+            st.markdown("""
+            1. Create an account with [Twelve Data](https://twelvedata.com/).
+            2. Copy your API key.
+            3. Paste it into the password field in the sidebar.
+            """)
+            return
         c1, c2 = st.columns([1, 3])
         with c1:
             go = st.button(f"Scan {label}", type="primary", key=f"scan_{interval}", use_container_width=True)
@@ -275,21 +290,21 @@ def show_scan(tab, label, interval):
             m1.metric("Pairs analysed", len(results))
             m2.metric("BUY setups", buys)
             m3.metric("SELL setups", sells)
-            m4.metric("A-grade setups", a_count)
+            m4.metric("Best-quality setups", a_count)
             st.caption(f"Last scan: {stamp}")
             actionable = [x for x in results if x["Signal"] != "WAIT"]
             if not actionable:
                 st.warning("No confirmed entry setup passed all rules. Do not force a trade.")
             elif a_count:
-                st.success(f"{a_count} A-grade setup(s) passed the scanner rules. Verify spread, news and price before considering a trade.")
+                st.success(f"{a_count} high-quality setup(s) matched the scanner rules. Check trading costs, news and the live price before considering a trade.")
             else:
-                st.info("Setups found, but none reached A grade. Treat them as watchlist candidates.")
-            st.subheader("Top opportunities")
+                st.info("Some possible setups appeared, but none met the highest quality level. Treat them as watchlist candidates.")
+            st.subheader("Best-looking opportunities")
             cards = st.columns(3)
             for col, item in zip(cards, results[:3]):
                 with col:
                     color = "good" if item["Signal"] == "BUY" else ("bad" if item["Signal"] == "SELL" else "")
-                    st.markdown(f"**{item['Pair']}** · <span class='{color}'>{item['Signal']}</span> · **{item['Grade']} ({item['Score']}/100)**", unsafe_allow_html=True)
+                    st.markdown(f"**{item['Pair']}** · <span class='{color}'>{item['Signal']}</span> · **{item['Grade']} · {item['Score']}/100 strength**", unsafe_allow_html=True)
                     st.caption(item["Setup"])
                     if item["Signal"] != "WAIT":
                         st.write(f"Entry: `{fmt_price(item['Pair'], item['Entry'])}`")
@@ -297,21 +312,37 @@ def show_scan(tab, label, interval):
                         st.write(f"Target 1: `{fmt_price(item['Pair'], item['Target_1'])}`")
                         st.write(f"Target 2: `{fmt_price(item['Pair'], item['Target_2'])}`")
                         st.write(f"Stop distance: `{item['Risk_pips']:.1f} pips`")
-                    st.write(f"RSI: {item['RSI']:.1f} · ATR: {item['ATR_pips']:.1f} pips")
+                    st.write(f"Buying/selling pressure: {item['Pressure']:.1f}/100")
+                    st.write(f"Typical movement per candle: {item['Typical_move_pips']:.1f} pips")
             rows = []
             for x in results:
-                rows.append({k: x[k] for k in ["Pair","Signal","Grade","Score","Setup","Price","RSI","ATR_pips","Risk_pips","Time"]})
-            frame = pd.DataFrame(rows)
-            st.subheader("Full ranked scan")
+                rows.append({k: x[k] for k in ["Pair","Signal","Grade","Score","Setup","Price","Pressure","Typical_move_pips","Risk_pips","Time"]})
+            frame = pd.DataFrame(rows).rename(columns={
+                "Grade": "Quality level", "Score": "Rule match score", "Setup": "Why it appeared",
+                "Pressure": "Buying/selling pressure (0–100)", "Typical_move_pips": "Usual movement (pips)",
+                "Risk_pips": "Stop distance (pips)", "Time": "Last candle time"
+            })
+            st.subheader("All results, ranked from strongest match")
             st.dataframe(frame, use_container_width=True, hide_index=True,
-                         column_config={"Price": st.column_config.NumberColumn(format="%.5f"),
-                                        "RSI": st.column_config.NumberColumn(format="%.1f"),
-                                        "ATR_pips": st.column_config.NumberColumn(format="%.1f"),
-                                        "Risk_pips": st.column_config.NumberColumn(format="%.1f")})
+                         column_config={"Price": st.column_config.NumberColumn("Current price", format="%.5f"),
+                                        "Buying/selling pressure (0–100)": st.column_config.NumberColumn(format="%.1f"),
+                                        "Usual movement (pips)": st.column_config.NumberColumn(format="%.1f"),
+                                        "Stop distance (pips)": st.column_config.NumberColumn(format="%.1f")})
             chart_pair = st.selectbox("Chart pair", [x["Pair"] for x in results], key=f"chart_{interval}")
             chosen = next(x for x in results if x["Pair"] == chart_pair)
-            st.subheader(f"{chart_pair} · price and EMAs")
-            st.line_chart(chosen["Chart"], height=320)
+            st.subheader(f"{chart_pair} · price direction")
+            chart = chosen["Chart"].rename(columns={
+                "close": "Closing price", "EMA20": "Short-term average (20)",
+                "EMA50": "Medium-term average (50)", "EMA200": "Long-term average (200)"
+            })
+            st.line_chart(chart, height=320)
+            with st.expander("What do these numbers mean?"):
+                st.markdown("""
+                - **Buying/selling pressure:** A 0–100 reading of which side has been stronger recently. It is not a prediction. Very high or low readings can mean a move is stretched.
+                - **Typical movement:** About how far the pair has usually moved in one candle, measured in pips. It helps estimate how much room a stop-loss may need.
+                - **Price averages:** Smoothed price lines that help show the general direction over short, medium and longer periods.
+                - **Setup strength:** How many of the scanner's conditions agree. It is **not** the percentage chance of winning.
+                """)
             csv = frame.to_csv(index=False).encode("utf-8")
             st.download_button("Download scan CSV", csv, file_name=f"forex_{interval}_scan.csv",
                                mime="text/csv", key=f"csv_{interval}")
@@ -326,26 +357,195 @@ show_scan(tab_intraday, "Intraday setups", "15min")
 show_scan(tab_swing, "Swing setups", "1day")
 
 with tab_risk:
-    st.subheader("Position sizing — $500 USD account")
-    st.write("Enter the planned stop distance. This calculator gives a rough sizing estimate for USD-quoted pairs (EUR/USD, GBP/USD, AUD/USD, NZD/USD).")
+    st.subheader("How much should I trade? — position size calculator")
+    st.write("Enter how far away your stop-loss will be. The calculator estimates a trade size so that a stop-loss would cost about your chosen risk amount. This simplified version is accurate only for pairs where USD is the second currency (for example EUR/USD).")
     pair = st.selectbox("Pair", ["EUR/USD","GBP/USD","AUD/USD","NZD/USD","USD/JPY","USD/CAD","USD/CHF"])
-    stop_pips = st.number_input("Stop distance (pips)", min_value=1.0, max_value=500.0, value=20.0, step=1.0)
+    stop_pips = st.number_input("Distance from entry to stop-loss (pips)", min_value=1.0, max_value=500.0, value=20.0, step=1.0)
     risk_amount = capital * risk_pct / 100
     if pair.endswith("/USD"):
         pip_value_per_standard_lot = 10.0
         lots = risk_amount / (stop_pips * pip_value_per_standard_lot)
         units = lots * 100000
-        st.metric("Estimated position size", f"{lots:.3f} standard lots")
+        st.metric("Estimated trade size", f"{lots:.3f} standard lots")
         st.metric("Approximate units", f"{units:,.0f}")
-        st.caption(f"At {risk_pct:.2f}% risk, planned loss at the stop is about ${risk_amount:.2f}, before spread, commission and slippage.")
+        st.caption(f"With {risk_pct:.2f}% risk, the planned loss at the stop is about ${risk_amount:.2f}. Real costs and currency conversion can change the result.")
     else:
-        st.info("For this pair, pip value changes with the exchange rate. Use your broker's pip-value calculator rather than this simplified USD-quote calculation.")
+        st.info("The value of a pip for this pair changes with the exchange rate. This basic calculator does not yet calculate that conversion. Check the pip value with your broker before placing a trade.")
+
+
+# Trade-duration calculator: estimates a rough holding-time range from the target distance
+# and the recent/entered average movement per candle. It is a planning aid, not a forecast.
+with tab_duration:
+    st.subheader("How long might I stay in this trade?")
+    st.caption(
+        "Estimate a rough time range for price to travel from your entry to your take-profit target. "
+        "The estimate uses the target distance and the pair's usual movement per candle."
+    )
+
+    scan_choices = []
+    for interval_key, interval_name in [("15min", "Intraday · 15-minute candles"), ("1day", "Swing · daily candles")]:
+        for scanned in st.session_state.get(f"results_{interval_key}", []):
+            if scanned.get("Signal") in ("BUY", "SELL") and np.isfinite(scanned.get("Entry", np.nan)):
+                scan_choices.append({
+                    "label": f"{scanned['Pair']} · {scanned['Signal']} · {interval_name} · {scanned['Grade']} grade",
+                    "record": scanned,
+                    "interval_key": interval_key,
+                    "interval_name": interval_name,
+                })
+
+    use_scan = False
+    selected_scan = None
+    if scan_choices:
+        source = st.radio(
+            "Where should the numbers come from?",
+            ["Use a setup from my latest scan", "Enter my own trade details"],
+            horizontal=True,
+            key="duration_source",
+        )
+        use_scan = source == "Use a setup from my latest scan"
+    else:
+        st.info("Run an intraday or swing scan first to use its suggested entry, target and typical movement automatically. You can also enter the numbers manually below.")
+
+    if use_scan:
+        selected_label = st.selectbox(
+            "Choose a scanned setup",
+            [x["label"] for x in scan_choices],
+            key="duration_scan_choice",
+        )
+        selected_scan = next(x for x in scan_choices if x["label"] == selected_label)
+        scanned = selected_scan["record"]
+        pair = scanned["Pair"]
+        interval_key = selected_scan["interval_key"]
+        timeframe_minutes = 15 if interval_key == "15min" else 1440
+        timeframe_label = "15 minutes" if interval_key == "15min" else "1 trading day"
+        atr_pips = float(scanned["Typical_move_pips"])
+        target_choice = st.radio(
+            "Which profit target should I estimate?",
+            ["Target 1 (closer target)", "Target 2 (further target)"],
+            horizontal=True,
+            key="duration_target_choice",
+        )
+        target_price = float(scanned["Target_1"] if target_choice.startswith("Target 1") else scanned["Target_2"])
+        target_distance_pips = abs(target_price - float(scanned["Entry"])) / pip_size(pair)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Pair and direction", f"{pair} · {scanned['Signal']}")
+        c2.metric("Entry price", fmt_price(pair, float(scanned["Entry"])))
+        c3.metric("Target price", fmt_price(pair, target_price))
+        st.caption(
+            f"Using {timeframe_label} candles. The scanner's recent usual movement is "
+            f"{atr_pips:.1f} pips per candle. Target distance: {target_distance_pips:.1f} pips."
+        )
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            pair = st.selectbox("Currency pair", PAIRS, index=0, key="duration_pair")
+            timeframe_options = {
+                "5 minutes": 5,
+                "15 minutes": 15,
+                "30 minutes": 30,
+                "1 hour": 60,
+                "4 hours": 240,
+                "1 trading day": 1440,
+            }
+            timeframe_label = st.selectbox(
+                "Chart candle size",
+                list(timeframe_options.keys()),
+                index=1,
+                key="duration_timeframe",
+            )
+            timeframe_minutes = timeframe_options[timeframe_label]
+        with c2:
+            target_distance_pips = st.number_input(
+                "Distance from entry to profit target (pips)",
+                min_value=0.1,
+                max_value=10000.0,
+                value=30.0,
+                step=1.0,
+                key="duration_target_pips",
+                help="For example, if your entry is 1.0800 and your target is 1.0830 on EUR/USD, the distance is 30 pips.",
+            )
+            atr_pips = st.number_input(
+                "Usual price movement per candle (pips)",
+                min_value=0.1,
+                max_value=5000.0,
+                value=8.0,
+                step=0.5,
+                key="duration_typical_move",
+                help="Use the scanner's 'usual movement per candle' value where available. It is the average size of movement, not a promise of movement in your trade's direction.",
+            )
+
+    st.markdown("#### How the estimate is calculated")
+    st.write(
+        "A market can move back and forth, so it will not travel toward your target on every candle. "
+        "The calculator shows three planning scenarios: slower progress (25% of usual movement), "
+        "middle progress (50%), and faster progress (75%). These are assumptions, not probabilities."
+    )
+
+    if atr_pips <= 0 or target_distance_pips <= 0 or timeframe_minutes <= 0:
+        st.error("Enter a target distance and usual candle movement greater than zero.")
+    else:
+        slow_bars = target_distance_pips / (atr_pips * 0.25)
+        middle_bars = target_distance_pips / (atr_pips * 0.50)
+        fast_bars = target_distance_pips / (atr_pips * 0.75)
+
+        def describe_holding_time(bars: float, candle_minutes: int) -> str:
+            if candle_minutes == 1440:
+                return f"{bars:.1f} trading days ({bars:.1f} daily candles)"
+            total_minutes = bars * candle_minutes
+            total_hours = total_minutes / 60
+            if total_hours < 1:
+                return f"about {total_minutes:.0f} minutes ({bars:.1f} candles)"
+            if total_hours < 24:
+                return f"about {total_hours:.1f} trading hours ({bars:.1f} candles)"
+            return f"about {total_hours / 24:.1f} 24-hour periods ({bars:.1f} candles)"
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Faster-market scenario", describe_holding_time(fast_bars, timeframe_minutes))
+        m2.metric("Middle planning estimate", describe_holding_time(middle_bars, timeframe_minutes))
+        m3.metric("Slower-market scenario", describe_holding_time(slow_bars, timeframe_minutes))
+
+        st.success(
+            f"A practical planning range is roughly {describe_holding_time(fast_bars, timeframe_minutes)} "
+            f"to {describe_holding_time(slow_bars, timeframe_minutes)}. "
+            f"The middle scenario is {describe_holding_time(middle_bars, timeframe_minutes)}."
+        )
+
+        st.markdown("#### Set a time-based review point")
+        default_review_bars = 16 if timeframe_minutes <= 15 else (8 if timeframe_minutes <= 60 else (6 if timeframe_minutes <= 240 else 5))
+        review_bars = st.number_input(
+            f"After how many {timeframe_label} candles should I review the trade if neither target nor stop has been reached?",
+            min_value=1,
+            max_value=500,
+            value=default_review_bars,
+            step=1,
+            key="duration_review_bars",
+        )
+        st.info(
+            "Review reminder: " + describe_holding_time(float(review_bars), timeframe_minutes) +
+            ". At that point, check whether the original reason for entering still holds. This is a review point, "
+            "not an instruction to close automatically."
+        )
+
+        with st.expander("What do these numbers mean?"):
+            st.markdown("""
+            - **Target distance:** How far price must move from your planned entry to reach your profit target.
+            - **Usual movement per candle:** How much the pair has typically moved during one candle. The scanner uses ATR for this figure.
+            - **Candle:** One bar on your chart. A 15-minute candle represents 15 minutes; a daily candle represents one trading day.
+            - **Middle estimate:** A planning example that assumes price makes progress toward the target equal to half its usual candle movement on average.
+            - **Review point:** A time to check whether the trade still makes sense. It is not a guaranteed exit time.
+            """)
+
+    st.warning(
+        "Important: this calculator cannot know how long a trade will actually take. Price may reach the stop-loss first, "
+        "move sideways, or never reach the target. Use your stop-loss and trading plan—not this time estimate—to control risk. "
+        "Weekend closures, news, spreads and changing volatility can make the actual holding time longer or shorter."
+    )
 
 st.divider()
 st.markdown("""
 <div class="note">
-<b>Important:</b> A-grade is a technical score, not a win probability. Forex is leveraged and can lose more quickly than expected.
-The scanner does not account for your broker's exact bid/ask spread, swaps, commissions, execution slippage, or all scheduled economic releases.
+<b>Important:</b> The A/B/C/D grade is a setup-strength score, not a win probability. Forex is leveraged and can lose more quickly than expected.
+The scanner does not yet account for your broker's exact spread, swaps, commissions, execution slippage, or all scheduled economic releases.
 Live-feed access and request limits depend on your Twelve Data account and subscription. Confirm that your account's FX entitlement is real-time before trading.
 No trades are placed and no broker account is connected.
 </div>
